@@ -13,6 +13,7 @@
 (define-constant err-invalid-rating (err u107))
 (define-constant err-already-rated (err u108))
 (define-constant err-request-not-completed (err u109))
+(define-constant err-access-denied (err u110))
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -41,6 +42,19 @@
         completed-tasks: uint,
         slashed-count: uint,
     }
+)
+
+(define-map model-privacy
+    uint ;; model-id
+    bool ;; is-private
+)
+
+(define-map model-access-list
+    {
+        model-id: uint,
+        accessor: principal,
+    }
+    bool ;; specific access
 )
 
 (define-map model-ratings
@@ -161,8 +175,20 @@
             (model (unwrap! (map-get? models model-id) err-not-found))
             (price (get price model))
             (req-id (+ (var-get total-requests) u1))
+            (is-private (default-to false (map-get? model-privacy model-id)))
+            (has-access (or
+                (not is-private)
+                (is-eq tx-sender (get developer model))
+                (default-to false
+                    (map-get? model-access-list {
+                        model-id: model-id,
+                        accessor: tx-sender,
+                    })
+                )
+            ))
         )
         (asserts! (get active model) err-not-found)
+        (asserts! has-access err-access-denied)
         (try! (contract-call? token transfer price tx-sender (as-contract tx-sender)
             none
         ))
@@ -309,5 +335,71 @@
             rating-count: (get rating-count model),
         })
         err-not-found
+    )
+)
+
+(define-public (set-model-privacy
+        (model-id uint)
+        (is-private bool)
+    )
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-set model-privacy model-id is-private)
+        (ok true)
+    )
+)
+
+(define-public (grant-access
+        (model-id uint)
+        (user principal)
+    )
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-set model-access-list {
+            model-id: model-id,
+            accessor: user,
+        }
+            true
+        )
+        (ok true)
+    )
+)
+
+(define-public (revoke-access
+        (model-id uint)
+        (user principal)
+    )
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-delete model-access-list {
+            model-id: model-id,
+            accessor: user,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (is-model-private (id uint))
+    (default-to false (map-get? model-privacy id))
+)
+
+(define-read-only (check-access
+        (model-id uint)
+        (user principal)
+    )
+    (let (
+            (model (unwrap! (map-get? models model-id) err-not-found))
+            (is-private (default-to false (map-get? model-privacy model-id)))
+        )
+        (ok (or
+            (not is-private)
+            (is-eq user (get developer model))
+            (default-to false
+                (map-get? model-access-list {
+                    model-id: model-id,
+                    accessor: user,
+                })
+            )
+        ))
     )
 )
