@@ -338,13 +338,13 @@
         )
         (asserts! (is-eq (get buyer req) tx-sender) err-unauthorized)
         (asserts! (is-eq (get status req) "pending") err-request-filled)
-        (asserts! (> block-height (+ (get created-at req) request-expiry-blocks)) err-request-not-expired)
+        (asserts! (> block-height (+ (get created-at req) request-expiry-blocks))
+            err-request-not-expired
+        )
 
         (try! (as-contract (contract-call? token transfer payment tx-sender (get buyer req) none)))
-        
-        (map-set requests req-id
-            (merge req { status: "expired" })
-        )
+
+        (map-set requests req-id (merge req { status: "expired" }))
         (ok true)
     )
 )
