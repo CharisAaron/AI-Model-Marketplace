@@ -15,6 +15,7 @@
 (define-constant err-request-not-completed (err u109))
 (define-constant err-invalid-amount (err u110))
 (define-constant err-request-not-expired (err u111))
+(define-constant err-oracle-not-active (err u112))
 (define-constant request-expiry-blocks u144)
 
 (define-data-var total-models uint u0)
@@ -364,5 +365,37 @@
             })
         )
         (ok true)
+    )
+)
+
+(define-public (request-inference-from-oracle
+        (token <sbtc-trait>)
+        (model-id uint)
+        (input-hash (buff 32))
+        (target-oracle principal)
+    )
+    (let (
+            (model (unwrap! (map-get? models model-id) err-not-found))
+            (oracle (unwrap! (map-get? oracles target-oracle) err-not-found))
+            (price (get price model))
+            (req-id (+ (var-get total-requests) u1))
+        )
+        (asserts! (get active model) err-not-found)
+        (asserts! (get active oracle) err-oracle-not-active)
+        
+        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender) none))
+        
+        (map-set requests req-id {
+            buyer: tx-sender,
+            model-id: model-id,
+            input-hash: input-hash,
+            payment-amount: price,
+            status: "pending",
+            assigned-oracle: (some target-oracle),
+            result-hash: none,
+            created-at: block-height,
+        })
+        (var-set total-requests req-id)
+        (ok req-id)
     )
 )

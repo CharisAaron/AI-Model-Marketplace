@@ -10,7 +10,7 @@ path = "contracts/sbtc-trait.clar"
 depends_on = []
 
 [contracts.ai-marketplace]
-path = "contracts/ai-marketplace.clar"
+path = "contracts/ai-marketplace-v2.clar"
 depends_on = ["sbtc-trait"]
 
 [repl.analysis]
