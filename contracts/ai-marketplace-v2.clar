@@ -1,6 +1,7 @@
-(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
 
-(define-constant contract-owner tx-sender)
+(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
+(define-data-var contract-owner principal tx-sender)
+(define-data-var pending-owner (optional principal) none)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
 (define-constant err-invalid-payment (err u102))
@@ -20,6 +21,7 @@
 (define-constant err-already-disputed (err u115))
 (define-constant err-not-disputed (err u116))
 (define-constant err-invalid-governance-param (err u117))
+(define-constant err-low-reputation (err u118))
 
 (define-data-var min-stake uint u100000)
 (define-data-var platform-fee-bps uint u250)
@@ -41,6 +43,7 @@
         active: bool,
         rating-sum: uint,
         rating-count: uint,
+        min-reputation: uint,
     }
 )
 
@@ -88,6 +91,7 @@
         (name (string-ascii 64))
         (description (string-ascii 256))
         (price uint)
+        (min-reputation uint)
     )
     (let ((model-id (+ (var-get total-models) u1)))
         (map-set models model-id {
@@ -99,6 +103,7 @@
             active: true,
             rating-sum: u0,
             rating-count: u0,
+            min-reputation: min-reputation,
         })
         (var-set total-models model-id)
         (ok model-id)
@@ -109,6 +114,7 @@
         (model-id uint)
         (new-price uint)
         (new-active bool)
+        (new-min-reputation uint)
     )
     (let ((model (unwrap! (map-get? models model-id) err-not-found)))
         (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
@@ -119,6 +125,7 @@
                 active: new-active,
                 rating-sum: (get rating-sum model),
                 rating-count: (get rating-count model),
+                min-reputation: new-min-reputation,
             })
         )
         (ok true)
@@ -172,10 +179,13 @@
             (requested-at (unwrap! (get unstake-requested-at oracle) err-unstake-not-requested))
         )
         (asserts! (>= current-stake amount) err-insufficient-stake)
-        (asserts! (> block-height (+ requested-at (var-get unstake-cooldown-blocks))) err-cooldown-active)
-        
+        (asserts!
+            (> block-height (+ requested-at (var-get unstake-cooldown-blocks)))
+            err-cooldown-active
+        )
+
         (try! (as-contract (contract-call? token transfer amount tx-sender tx-sender none)))
-        
+
         (map-set oracles tx-sender
             (merge oracle {
                 staked-amount: (- current-stake amount),
@@ -229,6 +239,9 @@
             (developer-amt (- payment fee))
         )
         (asserts! (get active oracle) err-unauthorized)
+        (asserts! (>= (get reputation oracle) (get min-reputation model))
+            err-low-reputation
+        )
         (asserts! (is-eq (get status req) "pending") err-request-filled)
 
         (try! (as-contract (contract-call? token transfer developer-amt tx-sender
@@ -263,7 +276,7 @@
             (oracle (unwrap! (map-get? oracles oracle-addr) err-not-found))
             (current-stake (get staked-amount oracle))
         )
-        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
         (asserts! (>= current-stake penalty) err-insufficient-stake)
 
         (map-set oracles oracle-addr
@@ -351,9 +364,11 @@
         (amount uint)
     )
     (begin
-        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
         (asserts! (<= amount (var-get platform-balance)) err-invalid-amount)
-        (try! (as-contract (contract-call? token transfer amount tx-sender contract-owner none)))
+        (try! (as-contract (contract-call? token transfer amount tx-sender (var-get contract-owner)
+            none
+        )))
         (var-set platform-balance (- (var-get platform-balance) amount))
         (ok true)
     )
@@ -369,7 +384,10 @@
         )
         (asserts! (is-eq (get buyer req) tx-sender) err-unauthorized)
         (asserts! (is-eq (get status req) "pending") err-request-filled)
-        (asserts! (> block-height (+ (get created-at req) (var-get request-expiry-blocks)))
+        (asserts!
+            (> block-height
+                (+ (get created-at req) (var-get request-expiry-blocks))
+            )
             err-request-not-expired
         )
 
@@ -412,9 +430,14 @@
         )
         (asserts! (get active model) err-not-found)
         (asserts! (get active oracle) err-oracle-not-active)
-        
-        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender) none))
-        
+        (asserts! (>= (get reputation oracle) (get min-reputation model))
+            err-low-reputation
+        )
+
+        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender)
+            none
+        ))
+
         (map-set requests req-id {
             buyer: tx-sender,
             model-id: model-id,
@@ -430,25 +453,19 @@
     )
 )
 
-(define-public (flag-dispute
-        (req-id uint)
-    )
-    (let (
-            (req (unwrap! (map-get? requests req-id) err-not-found))
-        )
+(define-public (flag-dispute (req-id uint))
+    (let ((req (unwrap! (map-get? requests req-id) err-not-found)))
         (asserts! (is-eq (get buyer req) tx-sender) err-unauthorized)
         (asserts! (is-eq (get status req) "completed") err-request-not-completed)
         (asserts! (is-none (map-get? disputes req-id)) err-already-disputed)
-        
+
         (map-set disputes req-id {
             flagged-by: tx-sender,
             flagged-at: block-height,
             resolved: false,
         })
-        
-        (map-set requests req-id
-            (merge req { status: "disputed" })
-        )
+
+        (map-set requests req-id (merge req { status: "disputed" }))
         (ok true)
     )
 )
@@ -461,18 +478,87 @@
             (req (unwrap! (map-get? requests req-id) err-not-found))
             (dispute (unwrap! (map-get? disputes req-id) err-not-disputed))
         )
-        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
         (asserts! (is-eq (get status req) "disputed") err-not-disputed)
         (asserts! (is-eq (get resolved dispute) false) err-already-disputed)
-        
-        (map-set disputes req-id
-            (merge dispute { resolved: true })
-        )
-        
+
+        (map-set disputes req-id (merge dispute { resolved: true }))
+
         (if in-favor-of-buyer
             (map-set requests req-id (merge req { status: "refunded" }))
             (map-set requests req-id (merge req { status: "completed" }))
         )
         (ok true)
+    )
+)
+
+(define-public (transfer-ownership (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
+        (var-set pending-owner (some new-owner))
+        (ok true)
+    )
+)
+
+(define-public (claim-ownership)
+    (let ((pending (unwrap! (var-get pending-owner) err-unauthorized)))
+        (asserts! (is-eq tx-sender pending) err-unauthorized)
+        (var-set contract-owner pending)
+        (var-set pending-owner none)
+        (ok true)
+    )
+)
+
+(define-private (request-inference-iter
+        (input-hash (buff 32))
+        (ctx {
+            id: uint,
+            model-id: uint,
+            price: uint,
+            buyer: principal,
+        })
+    )
+    (let ((next-id (+ (get id ctx) u1)))
+        (map-set requests next-id {
+            buyer: (get buyer ctx),
+            model-id: (get model-id ctx),
+            input-hash: input-hash,
+            payment-amount: (get price ctx),
+            status: "pending",
+            assigned-oracle: none,
+            result-hash: none,
+            created-at: block-height,
+        })
+        (merge ctx { id: next-id })
+    )
+)
+
+(define-public (request-inference-bulk
+        (token <sbtc-trait>)
+        (model-id uint)
+        (input-hashes (list 20 (buff 32)))
+    )
+    (let (
+            (model (unwrap! (map-get? models model-id) err-not-found))
+            (price (get price model))
+            (count (len input-hashes))
+            (total-cost (* price count))
+            (start-id (var-get total-requests))
+            (ctx {
+                id: start-id,
+                model-id: model-id,
+                price: price,
+                buyer: tx-sender,
+            })
+        )
+        (asserts! (get active model) err-not-found)
+        (try! (contract-call? token transfer total-cost tx-sender
+            (as-contract tx-sender) none
+        ))
+
+        (let ((final-ctx (fold request-inference-iter input-hashes ctx)))
+            (var-set total-requests (get id final-ctx))
+            (ok (get id final-ctx))
+        )
     )
 )
