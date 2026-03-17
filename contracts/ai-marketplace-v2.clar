@@ -1,4 +1,4 @@
-﻿(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
+(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
