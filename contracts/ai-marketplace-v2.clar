@@ -15,6 +15,7 @@
 (define-constant err-request-not-expired (err u111))
 (define-constant err-model-deprecated (err u112))
 (define-constant err-version-not-found (err u113))
+(define-constant err-invalid-split (err u114))
 (define-constant min-stake u100000)
 (define-constant platform-fee-bps u250)
 (define-constant request-expiry-blocks u144)
@@ -45,6 +46,18 @@
         description: (string-ascii 256),
         deprecated: bool,
         deprecated-at: (optional uint),
+    }
+)
+
+(define-map model-splits
+    uint
+    {
+        collab-a: (optional principal),
+        share-a: uint,
+        collab-b: (optional principal),
+        share-b: uint,
+        collab-c: (optional principal),
+        share-c: uint,
     }
 )
 
@@ -101,6 +114,52 @@
             description: description,
             deprecated: false,
             deprecated-at: none,
+        })
+        (var-set total-models model-id)
+        (ok model-id)
+    )
+)
+
+(define-public (register-model-with-splits
+        (name (string-ascii 64))
+        (description (string-ascii 256))
+        (price uint)
+        (collab-a (optional principal))
+        (share-a uint)
+        (collab-b (optional principal))
+        (share-b uint)
+        (collab-c (optional principal))
+        (share-c uint)
+    )
+    (let (
+            (model-id (+ (var-get total-models) u1))
+            (total-shares (+ (+ share-a share-b) share-c))
+        )
+        (asserts! (< total-shares u10000) err-invalid-split)
+        (map-set models model-id {
+            developer: tx-sender,
+            name: name,
+            description: description,
+            price: price,
+            version: u1,
+            active: true,
+            deprecated: false,
+            rating-sum: u0,
+            rating-count: u0,
+        })
+        (map-set model-versions { model-id: model-id, version: u1 } {
+            price: price,
+            description: description,
+            deprecated: false,
+            deprecated-at: none,
+        })
+        (map-set model-splits model-id {
+            collab-a: collab-a,
+            share-a: share-a,
+            collab-b: collab-b,
+            share-b: share-b,
+            collab-c: collab-c,
+            share-c: share-c,
         })
         (var-set total-models model-id)
         (ok model-id)
@@ -223,9 +282,7 @@
               )
             true
         )
-        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender)
-            none
-        ))
+        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender) none))
         (map-set requests req-id {
             buyer: tx-sender,
             model-id: model-id,
@@ -242,6 +299,17 @@
     )
 )
 
+(define-private (disburse-if-some
+        (token <sbtc-trait>)
+        (recipient (optional principal))
+        (amount uint)
+    )
+    (match recipient
+        addr (as-contract (contract-call? token transfer amount tx-sender addr none))
+        (ok true)
+    )
+)
+
 (define-public (fulfill-inference
         (token <sbtc-trait>)
         (req-id uint)
@@ -253,13 +321,24 @@
             (model (unwrap! (map-get? models (get model-id req)) err-not-found))
             (payment (get payment-amount req))
             (fee (/ (* payment platform-fee-bps) u10000))
-            (developer-amt (- payment fee))
+            (developer-pool (- payment fee))
         )
         (asserts! (get active oracle) err-unauthorized)
         (asserts! (is-eq (get status req) "pending") err-request-filled)
-        (try! (as-contract (contract-call? token transfer developer-amt tx-sender
-            (get developer model) none
-        )))
+        (match (map-get? model-splits (get model-id req))
+            s (let (
+                    (amt-a (/ (* developer-pool (get share-a s)) u10000))
+                    (amt-b (/ (* developer-pool (get share-b s)) u10000))
+                    (amt-c (/ (* developer-pool (get share-c s)) u10000))
+                    (dev-amt (- (- (- developer-pool amt-a) amt-b) amt-c))
+                )
+                (try! (as-contract (contract-call? token transfer dev-amt tx-sender (get developer model) none)))
+                (try! (disburse-if-some token (get collab-a s) amt-a))
+                (try! (disburse-if-some token (get collab-b s) amt-b))
+                (try! (disburse-if-some token (get collab-c s) amt-c))
+              )
+            (try! (as-contract (contract-call? token transfer developer-pool tx-sender (get developer model) none)))
+        )
         (map-set requests req-id
             (merge req {
                 status: "completed",
@@ -380,6 +459,10 @@
 
 (define-read-only (get-model-version (model-id uint) (version uint))
     (map-get? model-versions { model-id: model-id, version: version })
+)
+
+(define-read-only (get-model-splits (model-id uint))
+    (map-get? model-splits model-id)
 )
 
 (define-read-only (get-oracle (addr principal))
