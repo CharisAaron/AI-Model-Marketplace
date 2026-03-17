@@ -1,5 +1,4 @@
-(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
-
+﻿(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
@@ -14,9 +13,6 @@
 (define-constant err-already-rated (err u108))
 (define-constant err-request-not-completed (err u109))
 (define-constant err-invalid-amount (err u110))
-(define-constant err-request-not-expired (err u111))
-(define-constant err-oracle-not-active (err u112))
-(define-constant request-expiry-blocks u144)
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -326,76 +322,5 @@
         (try! (as-contract (contract-call? token transfer amount tx-sender contract-owner none)))
         (var-set platform-balance (- (var-get platform-balance) amount))
         (ok true)
-    )
-)
-
-(define-public (refund-stale-request
-        (token <sbtc-trait>)
-        (req-id uint)
-    )
-    (let (
-            (req (unwrap! (map-get? requests req-id) err-not-found))
-            (payment (get payment-amount req))
-        )
-        (asserts! (is-eq (get buyer req) tx-sender) err-unauthorized)
-        (asserts! (is-eq (get status req) "pending") err-request-filled)
-        (asserts! (> block-height (+ (get created-at req) request-expiry-blocks))
-            err-request-not-expired
-        )
-
-        (try! (as-contract (contract-call? token transfer payment tx-sender (get buyer req) none)))
-
-        (map-set requests req-id (merge req { status: "expired" }))
-        (ok true)
-    )
-)
-
-(define-public (update-model-metadata
-        (model-id uint)
-        (new-name (string-ascii 64))
-        (new-description (string-ascii 256))
-    )
-    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
-        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
-        (map-set models model-id
-            (merge model {
-                name: new-name,
-                description: new-description,
-                version: (+ (get version model) u1),
-            })
-        )
-        (ok true)
-    )
-)
-
-(define-public (request-inference-from-oracle
-        (token <sbtc-trait>)
-        (model-id uint)
-        (input-hash (buff 32))
-        (target-oracle principal)
-    )
-    (let (
-            (model (unwrap! (map-get? models model-id) err-not-found))
-            (oracle (unwrap! (map-get? oracles target-oracle) err-not-found))
-            (price (get price model))
-            (req-id (+ (var-get total-requests) u1))
-        )
-        (asserts! (get active model) err-not-found)
-        (asserts! (get active oracle) err-oracle-not-active)
-        
-        (try! (contract-call? token transfer price tx-sender (as-contract tx-sender) none))
-        
-        (map-set requests req-id {
-            buyer: tx-sender,
-            model-id: model-id,
-            input-hash: input-hash,
-            payment-amount: price,
-            status: "pending",
-            assigned-oracle: (some target-oracle),
-            result-hash: none,
-            created-at: block-height,
-        })
-        (var-set total-requests req-id)
-        (ok req-id)
     )
 )
