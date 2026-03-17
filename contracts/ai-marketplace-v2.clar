@@ -16,9 +16,12 @@
 (define-constant err-model-deprecated (err u112))
 (define-constant err-version-not-found (err u113))
 (define-constant err-invalid-split (err u114))
+(define-constant err-oracle-still-active (err u115))
 (define-constant min-stake u100000)
 (define-constant platform-fee-bps u250)
 (define-constant request-expiry-blocks u144)
+(define-constant oracle-idle-blocks u2016)
+(define-constant liveness-bounty-bps u100)
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -69,6 +72,7 @@
         active: bool,
         completed-tasks: uint,
         slashed-count: uint,
+        last-active-block: uint,
     }
 )
 
@@ -233,6 +237,7 @@
             active: true,
             completed-tasks: u0,
             slashed-count: u0,
+            last-active-block: block-height,
         })
         (ok true)
     )
@@ -259,6 +264,31 @@
             (merge oracle { staked-amount: (- current-stake amount) })
         )
         (ok true)
+    )
+)
+
+(define-public (flag-idle-oracle
+        (token <sbtc-trait>)
+        (oracle-addr principal)
+    )
+    (let (
+            (oracle (unwrap! (map-get? oracles oracle-addr) err-not-found))
+            (idle-since (get last-active-block oracle))
+            (current-stake (get staked-amount oracle))
+            (bounty (/ (* current-stake liveness-bounty-bps) u10000))
+        )
+        (asserts! (> block-height (+ idle-since oracle-idle-blocks)) err-oracle-still-active)
+        (asserts! (get active oracle) err-oracle-still-active)
+        (asserts! (>= current-stake bounty) err-insufficient-stake)
+        (try! (as-contract (contract-call? token transfer bounty tx-sender tx-sender none)))
+        (map-set oracles oracle-addr
+            (merge oracle {
+                active: false,
+                staked-amount: (- current-stake bounty),
+                slashed-count: (+ (get slashed-count oracle) u1),
+            })
+        )
+        (ok bounty)
     )
 )
 
@@ -350,6 +380,7 @@
             (merge oracle {
                 completed-tasks: (+ (get completed-tasks oracle) u1),
                 reputation: (+ (get reputation oracle) u1),
+                last-active-block: block-height,
             })
         )
         (var-set platform-balance (+ (var-get platform-balance) fee))
@@ -467,6 +498,13 @@
 
 (define-read-only (get-oracle (addr principal))
     (map-get? oracles addr)
+)
+
+(define-read-only (is-oracle-idle (addr principal))
+    (match (map-get? oracles addr)
+        oracle (ok (> block-height (+ (get last-active-block oracle) oracle-idle-blocks)))
+        err-not-found
+    )
 )
 
 (define-read-only (get-request (id uint))
