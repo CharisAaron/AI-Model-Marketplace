@@ -16,9 +16,15 @@
 (define-constant err-model-deprecated (err u112))
 (define-constant err-version-not-found (err u113))
 (define-constant err-invalid-split (err u114))
+(define-constant err-oracle-still-active (err u115))
+(define-constant err-not-whitelisted (err u116))
+(define-constant err-coupon-invalid (err u117))
+(define-constant err-coupon-exhausted (err u118))
 (define-constant min-stake u100000)
 (define-constant platform-fee-bps u250)
 (define-constant request-expiry-blocks u144)
+(define-constant oracle-idle-blocks u2016)
+(define-constant liveness-bounty-bps u100)
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -34,6 +40,7 @@
         version: uint,
         active: bool,
         deprecated: bool,
+        private: bool,
         rating-sum: uint,
         rating-count: uint,
     }
@@ -61,6 +68,22 @@
     }
 )
 
+(define-map model-whitelist
+    { model-id: uint, buyer: principal }
+    bool
+)
+
+(define-map coupons
+    (buff 32)
+    {
+        model-id: uint,
+        discount-bps: uint,
+        max-uses: uint,
+        uses-remaining: uint,
+        active: bool,
+    }
+)
+
 (define-map oracles
     principal
     {
@@ -69,6 +92,7 @@
         active: bool,
         completed-tasks: uint,
         slashed-count: uint,
+        last-active-block: uint,
     }
 )
 
@@ -96,6 +120,7 @@
         (name (string-ascii 64))
         (description (string-ascii 256))
         (price uint)
+        (private bool)
     )
     (let ((model-id (+ (var-get total-models) u1)))
         (map-set models model-id {
@@ -106,6 +131,7 @@
             version: u1,
             active: true,
             deprecated: false,
+            private: private,
             rating-sum: u0,
             rating-count: u0,
         })
@@ -124,6 +150,7 @@
         (name (string-ascii 64))
         (description (string-ascii 256))
         (price uint)
+        (private bool)
         (collab-a (optional principal))
         (share-a uint)
         (collab-b (optional principal))
@@ -144,6 +171,7 @@
             version: u1,
             active: true,
             deprecated: false,
+            private: private,
             rating-sum: u0,
             rating-count: u0,
         })
@@ -163,6 +191,59 @@
         })
         (var-set total-models model-id)
         (ok model-id)
+    )
+)
+
+(define-public (mint-coupon
+        (code-hash (buff 32))
+        (model-id uint)
+        (discount-bps uint)
+        (max-uses uint)
+    )
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (asserts! (is-none (map-get? coupons code-hash)) err-already-exists)
+        (asserts! (< discount-bps u10000) err-invalid-amount)
+        (asserts! (> max-uses u0) err-invalid-amount)
+        (map-set coupons code-hash {
+            model-id: model-id,
+            discount-bps: discount-bps,
+            max-uses: max-uses,
+            uses-remaining: max-uses,
+            active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (revoke-coupon (code-hash (buff 32)))
+    (let (
+            (coupon (unwrap! (map-get? coupons code-hash) err-not-found))
+            (model (unwrap! (map-get? models (get model-id coupon)) err-not-found))
+        )
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-set coupons code-hash (merge coupon { active: false }))
+        (ok true)
+    )
+)
+
+(define-public (set-model-privacy (model-id uint) (private bool))
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-set models model-id (merge model { private: private }))
+        (ok true)
+    )
+)
+
+(define-public (set-whitelist-entry
+        (model-id uint)
+        (buyer principal)
+        (approved bool)
+    )
+    (let ((model (unwrap! (map-get? models model-id) err-not-found)))
+        (asserts! (is-eq (get developer model) tx-sender) err-unauthorized)
+        (map-set model-whitelist { model-id: model-id, buyer: buyer } approved)
+        (ok true)
     )
 )
 
@@ -233,6 +314,7 @@
             active: true,
             completed-tasks: u0,
             slashed-count: u0,
+            last-active-block: block-height,
         })
         (ok true)
     )
@@ -262,6 +344,31 @@
     )
 )
 
+(define-public (flag-idle-oracle
+        (token <sbtc-trait>)
+        (oracle-addr principal)
+    )
+    (let (
+            (oracle (unwrap! (map-get? oracles oracle-addr) err-not-found))
+            (idle-since (get last-active-block oracle))
+            (current-stake (get staked-amount oracle))
+            (bounty (/ (* current-stake liveness-bounty-bps) u10000))
+        )
+        (asserts! (> block-height (+ idle-since oracle-idle-blocks)) err-oracle-still-active)
+        (asserts! (get active oracle) err-oracle-still-active)
+        (asserts! (>= current-stake bounty) err-insufficient-stake)
+        (try! (as-contract (contract-call? token transfer bounty tx-sender tx-sender none)))
+        (map-set oracles oracle-addr
+            (merge oracle {
+                active: false,
+                staked-amount: (- current-stake bounty),
+                slashed-count: (+ (get slashed-count oracle) u1),
+            })
+        )
+        (ok bounty)
+    )
+)
+
 (define-public (request-inference
         (token <sbtc-trait>)
         (model-id uint)
@@ -275,6 +382,10 @@
         )
         (asserts! (get active model) err-not-found)
         (asserts! (not (get deprecated model)) err-model-deprecated)
+        (if (get private model)
+            (asserts! (default-to false (map-get? model-whitelist { model-id: model-id, buyer: tx-sender })) err-not-whitelisted)
+            true
+        )
         (match pin-version
             v (let ((ver (unwrap! (map-get? model-versions { model-id: model-id, version: v }) err-version-not-found)))
                 (asserts! (not (get deprecated ver)) err-model-deprecated)
@@ -288,6 +399,57 @@
             model-id: model-id,
             input-hash: input-hash,
             payment-amount: price,
+            status: "pending",
+            assigned-oracle: none,
+            result-hash: none,
+            created-at: block-height,
+            pinned-version: pin-version,
+        })
+        (var-set total-requests req-id)
+        (ok req-id)
+    )
+)
+
+(define-public (request-inference-with-coupon
+        (token <sbtc-trait>)
+        (model-id uint)
+        (input-hash (buff 32))
+        (pin-version (optional uint))
+        (code-hash (buff 32))
+    )
+    (let (
+            (model (unwrap! (map-get? models model-id) err-not-found))
+            (coupon (unwrap! (map-get? coupons code-hash) err-coupon-invalid))
+            (price (get price model))
+            (req-id (+ (var-get total-requests) u1))
+            (discount (/ (* price (get discount-bps coupon)) u10000))
+            (final-price (- price discount))
+        )
+        (asserts! (get active model) err-not-found)
+        (asserts! (not (get deprecated model)) err-model-deprecated)
+        (asserts! (get active coupon) err-coupon-invalid)
+        (asserts! (is-eq (get model-id coupon) model-id) err-coupon-invalid)
+        (asserts! (> (get uses-remaining coupon) u0) err-coupon-exhausted)
+        (if (get private model)
+            (asserts! (default-to false (map-get? model-whitelist { model-id: model-id, buyer: tx-sender })) err-not-whitelisted)
+            true
+        )
+        (match pin-version
+            v (let ((ver (unwrap! (map-get? model-versions { model-id: model-id, version: v }) err-version-not-found)))
+                (asserts! (not (get deprecated ver)) err-model-deprecated)
+                true
+              )
+            true
+        )
+        (try! (contract-call? token transfer final-price tx-sender (as-contract tx-sender) none))
+        (map-set coupons code-hash
+            (merge coupon { uses-remaining: (- (get uses-remaining coupon) u1) })
+        )
+        (map-set requests req-id {
+            buyer: tx-sender,
+            model-id: model-id,
+            input-hash: input-hash,
+            payment-amount: final-price,
             status: "pending",
             assigned-oracle: none,
             result-hash: none,
@@ -350,6 +512,7 @@
             (merge oracle {
                 completed-tasks: (+ (get completed-tasks oracle) u1),
                 reputation: (+ (get reputation oracle) u1),
+                last-active-block: block-height,
             })
         )
         (var-set platform-balance (+ (var-get platform-balance) fee))
@@ -465,8 +628,23 @@
     (map-get? model-splits model-id)
 )
 
+(define-read-only (get-coupon (code-hash (buff 32)))
+    (map-get? coupons code-hash)
+)
+
+(define-read-only (is-buyer-whitelisted (model-id uint) (buyer principal))
+    (ok (default-to false (map-get? model-whitelist { model-id: model-id, buyer: buyer })))
+)
+
 (define-read-only (get-oracle (addr principal))
     (map-get? oracles addr)
+)
+
+(define-read-only (is-oracle-idle (addr principal))
+    (match (map-get? oracles addr)
+        oracle (ok (> block-height (+ (get last-active-block oracle) oracle-idle-blocks)))
+        err-not-found
+    )
 )
 
 (define-read-only (get-request (id uint))
