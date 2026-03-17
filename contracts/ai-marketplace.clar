@@ -1,5 +1,4 @@
-(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
-
+﻿(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
@@ -14,8 +13,6 @@
 (define-constant err-already-rated (err u108))
 (define-constant err-request-not-completed (err u109))
 (define-constant err-invalid-amount (err u110))
-(define-constant err-request-not-expired (err u111))
-(define-constant request-expiry-blocks u144)
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -324,27 +321,6 @@
         (asserts! (<= amount (var-get platform-balance)) err-invalid-amount)
         (try! (as-contract (contract-call? token transfer amount tx-sender contract-owner none)))
         (var-set platform-balance (- (var-get platform-balance) amount))
-        (ok true)
-    )
-)
-
-(define-public (refund-stale-request
-        (token <sbtc-trait>)
-        (req-id uint)
-    )
-    (let (
-            (req (unwrap! (map-get? requests req-id) err-not-found))
-            (payment (get payment-amount req))
-        )
-        (asserts! (is-eq (get buyer req) tx-sender) err-unauthorized)
-        (asserts! (is-eq (get status req) "pending") err-request-filled)
-        (asserts! (> block-height (+ (get created-at req) request-expiry-blocks)) err-request-not-expired)
-
-        (try! (as-contract (contract-call? token transfer payment tx-sender (get buyer req) none)))
-        
-        (map-set requests req-id
-            (merge req { status: "expired" })
-        )
         (ok true)
     )
 )
