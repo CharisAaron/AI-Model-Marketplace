@@ -13,6 +13,10 @@ depends_on = []
 path = "contracts/ai-marketplace-v2.clar"
 depends_on = ["sbtc-trait"]
 
+[contracts.ai-marketplace-v2]
+path = "contracts/ai-marketplace-v2.clar"
+depends_on = ["sbtc-trait"]
+
 [repl.analysis]
 passes = ["check_checker"]
 check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = false }
