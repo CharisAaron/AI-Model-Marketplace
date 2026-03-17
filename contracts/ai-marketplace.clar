@@ -1,5 +1,4 @@
-(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
-
+﻿(use-trait sbtc-trait .sbtc-trait.sbtc-trait)
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
@@ -13,6 +12,7 @@
 (define-constant err-invalid-rating (err u107))
 (define-constant err-already-rated (err u108))
 (define-constant err-request-not-completed (err u109))
+(define-constant err-invalid-amount (err u110))
 
 (define-data-var total-models uint u0)
 (define-data-var total-requests uint u0)
@@ -309,5 +309,18 @@
             rating-count: (get rating-count model),
         })
         err-not-found
+    )
+)
+
+(define-public (withdraw-platform-fees
+        (token <sbtc-trait>)
+        (amount uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= amount (var-get platform-balance)) err-invalid-amount)
+        (try! (as-contract (contract-call? token transfer amount tx-sender contract-owner none)))
+        (var-set platform-balance (- (var-get platform-balance) amount))
+        (ok true)
     )
 )
